@@ -58,7 +58,6 @@ function parseAIResponse(text) {
     return { code, output };
 }
 
-// FIX: Deterministic input classification (was missing — README described it but it was never implemented)
 function classifyInput(userInput, isFile = false) {
     if (isFile) return 'file';
 
@@ -76,7 +75,6 @@ function classifyInput(userInput, isFile = false) {
     return 'question';
 }
 
-// FIX: Load prompt templates from JSON (was using a simplified hardcoded prompt instead)
 const PROMPT_TEMPLATES = JSON.parse(
     fs.readFileSync(path.join(__dirname, '08_prompt_templates.json'), 'utf-8')
 );
@@ -88,12 +86,18 @@ function buildPrompt(userInput, inputType = 'question', language = 'Auto') {
         .replace('{language}', language);
 }
 
+// ================= MODEL CONFIG =================
+// FIX: Updated to valid OpenRouter model slugs (mistral-7b-instruct was deprecated)
+const MODELS = {
+    fast: "mistralai/mistral-7b-instruct:free",
+    standard: "mistralai/mistral-small-3.1-24b-instruct:free"
+};
+
 // ================= API: GENERATE =================
 app.post('/api/generate', async (req, res) => {
     const startTime = Date.now();
 
     try {
-        // FIX: language and mode were accepted but completely ignored
         const { userInput, language = 'Auto', mode = 'standard' } = req.body;
 
         if (!userInput) {
@@ -102,10 +106,8 @@ app.post('/api/generate', async (req, res) => {
 
         const inputType = classifyInput(userInput);
 
-        // FIX: Use correct model based on mode (mode was ignored before)
-        const model = mode === 'fast'
-            ? "mistralai/mistral-7b-instruct"
-            : "mistralai/mistral-7b-instruct";
+        // FIX: Now correctly picks different model based on mode
+        const model = mode === 'fast' ? MODELS.fast : MODELS.standard;
 
         const prompt = buildPrompt(userInput, inputType, language);
 
@@ -120,10 +122,8 @@ app.post('/api/generate', async (req, res) => {
         const { code, output } = parseAIResponse(text);
         const slug = generateSlug();
 
-        // Detect language label for response
         const detectedLanguage = language === 'Auto' ? detectLanguageFromCode(code) : language;
 
-        // FIX: INSERT was missing required NOT NULL columns: input_type and language
         if (pool) {
             await pool.query(
                 `INSERT INTO snippets (slug, input_type, language, user_input, generated_code, generated_output, model_used)
@@ -131,7 +131,6 @@ app.post('/api/generate', async (req, res) => {
                 [slug, inputType, detectedLanguage, userInput, code, output, model]
             );
 
-            // Log API usage
             await pool.query(
                 `INSERT INTO api_logs (request_type, prompt_tokens, completion_tokens, total_tokens, latency_ms)
                  VALUES ($1, $2, $3, $4, $5)`,
@@ -152,7 +151,6 @@ app.post('/api/generate', async (req, res) => {
             code,
             output,
             language: detectedLanguage,
-            // FIX: meta object was missing — frontend expected result.meta.model/tokens/latencyMs
             meta: {
                 model,
                 tokens: completion.usage?.total_tokens || 0,
@@ -181,7 +179,8 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         const prompt = buildPrompt(fileText, 'file', language);
 
-        const model = "mistralai/mistral-7b-instruct";
+        // FIX: Updated to valid OpenRouter model slug
+        const model = MODELS.standard;
 
         const completion = await openai.chat.completions.create({
             model,
@@ -194,7 +193,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         const slug = generateSlug();
         const detectedLanguage = language === 'Auto' ? detectLanguageFromCode(code) : language;
 
-        // FIX: Upload route never saved to DB at all
         if (pool) {
             const snippetResult = await pool.query(
                 `INSERT INTO snippets (slug, input_type, language, user_input, generated_code, generated_output, model_used)
@@ -232,7 +230,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     }
 });
 
-// FIX: GET /api/s/:slug was missing entirely — frontend called it but it didn't exist
+// ================= API: GET SNIPPET =================
 app.get('/api/s/:slug', async (req, res) => {
     try {
         const { slug } = req.params;
@@ -260,7 +258,7 @@ app.get('/api/s/:slug', async (req, res) => {
     }
 });
 
-// FIX: GET /api/s/:slug/raw was missing — referenced in README but never implemented
+// ================= API: GET RAW SNIPPET =================
 app.get('/api/s/:slug/raw', async (req, res) => {
     try {
         const { slug } = req.params;
@@ -286,7 +284,7 @@ app.get('/api/s/:slug/raw', async (req, res) => {
     }
 });
 
-// FIX: GET /api/stats was missing — referenced in README but never implemented
+// ================= API: STATS =================
 app.get('/api/stats', async (req, res) => {
     try {
         if (!pool) {
