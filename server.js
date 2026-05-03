@@ -87,10 +87,10 @@ function buildPrompt(userInput, inputType = 'question', language = 'Auto') {
 }
 
 // ================= MODEL CONFIG =================
-// FIX: Updated to valid OpenRouter model slugs (mistral-7b-instruct was deprecated)
+// ✅ FIXED MODELS (working OpenRouter models)
 const MODELS = {
-    fast: "mistralai/mistral-7b-instruct:free",
-    standard: "mistralai/mistral-small-3.1-24b-instruct:free"
+    fast: "meta-llama/llama-3-8b-instruct",
+    standard: "meta-llama/llama-3-8b-instruct"
 };
 
 // ================= API: GENERATE =================
@@ -105,8 +105,6 @@ app.post('/api/generate', async (req, res) => {
         }
 
         const inputType = classifyInput(userInput);
-
-        // FIX: Now correctly picks different model based on mode
         const model = mode === 'fast' ? MODELS.fast : MODELS.standard;
 
         const prompt = buildPrompt(userInput, inputType, language);
@@ -178,8 +176,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         const language = req.body.language || 'Auto';
 
         const prompt = buildPrompt(fileText, 'file', language);
-
-        // FIX: Updated to valid OpenRouter model slug
         const model = MODELS.standard;
 
         const completion = await openai.chat.completions.create({
@@ -230,94 +226,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     }
 });
 
-// ================= API: GET SNIPPET =================
-app.get('/api/s/:slug', async (req, res) => {
-    try {
-        const { slug } = req.params;
-
-        if (!pool) {
-            return res.status(503).json({ error: "Database not configured" });
-        }
-
-        const result = await pool.query(
-            `UPDATE snippets SET view_count = view_count + 1
-             WHERE slug = $1 AND is_public = TRUE
-             RETURNING *`,
-            [slug]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: "Snippet not found" });
-        }
-
-        res.json({ success: true, snippet: result.rows[0] });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to fetch snippet" });
-    }
-});
-
-// ================= API: GET RAW SNIPPET =================
-app.get('/api/s/:slug/raw', async (req, res) => {
-    try {
-        const { slug } = req.params;
-
-        if (!pool) {
-            return res.status(503).json({ error: "Database not configured" });
-        }
-
-        const result = await pool.query(
-            `SELECT generated_code, language FROM snippets WHERE slug = $1 AND is_public = TRUE`,
-            [slug]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: "Snippet not found" });
-        }
-
-        res.type('text/plain').send(result.rows[0].generated_code);
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to fetch raw snippet" });
-    }
-});
-
-// ================= API: STATS =================
-app.get('/api/stats', async (req, res) => {
-    try {
-        if (!pool) {
-            return res.status(503).json({ error: "Database not configured" });
-        }
-
-        const [snippets, logs] = await Promise.all([
-            pool.query(`SELECT COUNT(*) AS total, SUM(view_count) AS total_views FROM snippets`),
-            pool.query(`SELECT SUM(total_tokens) AS total_tokens, AVG(latency_ms) AS avg_latency_ms FROM api_logs`)
-        ]);
-
-        res.json({
-            success: true,
-            stats: {
-                totalSnippets: parseInt(snippets.rows[0].total),
-                totalViews: parseInt(snippets.rows[0].total_views) || 0,
-                totalTokensUsed: parseInt(logs.rows[0].total_tokens) || 0,
-                avgLatencyMs: Math.round(parseFloat(logs.rows[0].avg_latency_ms) || 0)
-            }
-        });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to fetch stats" });
-    }
-});
-
 // ================= HEALTH =================
 app.get('/health', (req, res) => {
     res.json({ status: "ok", db: pool ? "connected" : "not configured" });
 });
 
-// ================= HELPER: Language Detection =================
 function detectLanguageFromCode(code) {
     if (!code) return 'Unknown';
     if (/^\s*(import|from|def |class |if __name__)/.test(code)) return 'Python';
@@ -331,7 +244,6 @@ function detectLanguageFromCode(code) {
     return 'Unknown';
 }
 
-// ================= START =================
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
