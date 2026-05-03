@@ -80,10 +80,25 @@ const PROMPT_TEMPLATES = JSON.parse(
 );
 
 function buildPrompt(userInput, inputType = 'question', language = 'Auto') {
-    const template = PROMPT_TEMPLATES[inputType] || PROMPT_TEMPLATES['question'];
-    return template
-        .replace('{user_input}', userInput)
-        .replace('{language}', language);
+    return `You are a coding AI.
+
+STRICT RULES:
+- DO NOT explain anything
+- DO NOT add comments
+- ONLY return output in EXACT format below
+
+FORMAT:
+
+[CODE]
+<only code>
+
+[OUTPUT]
+<only output>
+
+Now solve:
+
+${userInput}
+`;
 }
 
 // ================= MODEL CONFIG =================
