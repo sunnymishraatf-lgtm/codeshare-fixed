@@ -21,6 +21,10 @@ if (process.env.DATABASE_URL) {
         connectionString: process.env.DATABASE_URL,
         ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
     });
+
+    pool.on('error', (err) => {
+        console.error('Unexpected DB error:', err.message);
+    });
 }
 
 // ================= OPENROUTER SETUP =================
@@ -45,7 +49,22 @@ const storage = multer.diskStorage({
     }
 });
 
-const upload = multer({ storage });
+const upload = multer({
+    storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+    fileFilter: (req, file, cb) => {
+        const allowed = ['.py', '.js', '.ts', '.java', '.cpp', '.c', '.go', '.rs', '.sql', '.txt', '.jsx', '.tsx'];
+        const ext = path.extname(file.originalname).toLowerCase();
+        cb(null, allowed.includes(ext));
+    }
+});
+
+// ================= MODEL CONFIG =================
+// Using openrouter/free — auto-selects from available free models, never 404s
+const MODELS = {
+    fast: "openrouter/free",
+    standard: "openrouter/free"
+};
 
 // ================= UTIL =================
 function generateSlug() {
@@ -58,193 +77,18 @@ function parseAIResponse(text) {
     return { code, output };
 }
 
-function classifyInput(userInput, isFile = false) {
-    if (isFile) return 'file';
-
+function classifyInput(userInput) {
     const codePatterns = [
         /^\s*(def |function |class |import |from |const |let |var |public |private |#include)/m,
         /[{}();]\s*$/m,
         /=>\s*{/,
         /\breturn\b/
     ];
-
     for (const pattern of codePatterns) {
         if (pattern.test(userInput)) return 'code';
     }
-
     return 'question';
 }
-
-const PROMPT_TEMPLATES = JSON.parse(
-    fs.readFileSync(path.join(__dirname, '08_prompt_templates.json'), 'utf-8')
-);
-
-function buildPrompt(userInput, inputType = 'question', language = 'Auto') {
-    return `You are a coding AI.
-
-STRICT RULES:
-- DO NOT explain anything
-- DO NOT add comments
-- ONLY return output in EXACT format below
-
-FORMAT:
-
-[CODE]
-<only code>
-
-[OUTPUT]
-<only output>
-
-Now solve:
-
-${userInput}
-`;
-}
-
-// ================= MODEL CONFIG =================
-// ✅ FIXED MODELS (working OpenRouter models)
-const MODELS = {
-    fast: "meta-llama/llama-3-8b-instruct",
-    standard: "meta-llama/llama-3-8b-instruct"
-};
-
-// ================= API: GENERATE =================
-app.post('/api/generate', async (req, res) => {
-    const startTime = Date.now();
-
-    try {
-        const { userInput, language = 'Auto', mode = 'standard' } = req.body;
-
-        if (!userInput) {
-            return res.status(400).json({ error: "Input required" });
-        }
-
-        const inputType = classifyInput(userInput);
-        const model = mode === 'fast' ? MODELS.fast : MODELS.standard;
-
-        const prompt = buildPrompt(userInput, inputType, language);
-
-        const completion = await openai.chat.completions.create({
-            model,
-            messages: [{ role: "user", content: prompt }],
-            temperature: 0.2
-        });
-
-        const latencyMs = Date.now() - startTime;
-        const text = completion.choices[0].message.content;
-        const { code, output } = parseAIResponse(text);
-        const slug = generateSlug();
-
-        const detectedLanguage = language === 'Auto' ? detectLanguageFromCode(code) : language;
-
-        if (pool) {
-            await pool.query(
-                `INSERT INTO snippets (slug, input_type, language, user_input, generated_code, generated_output, model_used)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-                [slug, inputType, detectedLanguage, userInput, code, output, model]
-            );
-
-            await pool.query(
-                `INSERT INTO api_logs (request_type, prompt_tokens, completion_tokens, total_tokens, latency_ms)
-                 VALUES ($1, $2, $3, $4, $5)`,
-                [
-                    'generate',
-                    completion.usage?.prompt_tokens || 0,
-                    completion.usage?.completion_tokens || 0,
-                    completion.usage?.total_tokens || 0,
-                    latencyMs
-                ]
-            );
-        }
-
-        res.json({
-            success: true,
-            slug,
-            shareUrl: `${process.env.FRONTEND_URL || "http://localhost:5173"}/s/${slug}`,
-            code,
-            output,
-            language: detectedLanguage,
-            meta: {
-                model,
-                tokens: completion.usage?.total_tokens || 0,
-                latencyMs,
-                inputType
-            }
-        });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "AI generation failed", details: err.message });
-    }
-});
-
-// ================= API: FILE UPLOAD =================
-app.post('/api/upload', upload.single('file'), async (req, res) => {
-    const startTime = Date.now();
-
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: "No file uploaded" });
-        }
-
-        const fileText = fs.readFileSync(req.file.path, 'utf-8');
-        const language = req.body.language || 'Auto';
-
-        const prompt = buildPrompt(fileText, 'file', language);
-        const model = MODELS.standard;
-
-        const completion = await openai.chat.completions.create({
-            model,
-            messages: [{ role: "user", content: prompt }]
-        });
-
-        const latencyMs = Date.now() - startTime;
-        const text = completion.choices[0].message.content;
-        const { code, output } = parseAIResponse(text);
-        const slug = generateSlug();
-        const detectedLanguage = language === 'Auto' ? detectLanguageFromCode(code) : language;
-
-        if (pool) {
-            const snippetResult = await pool.query(
-                `INSERT INTO snippets (slug, input_type, language, user_input, generated_code, generated_output, model_used)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-                [slug, 'file', detectedLanguage, fileText, code, output, model]
-            );
-
-            const snippetId = snippetResult.rows[0].id;
-
-            await pool.query(
-                `INSERT INTO file_uploads (snippet_id, original_filename, stored_filename, file_size_bytes, mime_type)
-                 VALUES ($1, $2, $3, $4, $5)`,
-                [snippetId, req.file.originalname, req.file.filename, req.file.size, req.file.mimetype]
-            );
-        }
-
-        res.json({
-            success: true,
-            slug,
-            shareUrl: `${process.env.FRONTEND_URL || "http://localhost:5173"}/s/${slug}`,
-            code,
-            output,
-            language: detectedLanguage,
-            meta: {
-                model,
-                tokens: completion.usage?.total_tokens || 0,
-                latencyMs,
-                inputType: 'file'
-            }
-        });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Upload failed", details: err.message });
-    }
-});
-
-// ================= HEALTH =================
-app.get('/health', (req, res) => {
-    res.json({ status: "ok", db: pool ? "connected" : "not configured" });
-});
 
 function detectLanguageFromCode(code) {
     if (!code) return 'Unknown';
@@ -259,8 +103,279 @@ function detectLanguageFromCode(code) {
     return 'Unknown';
 }
 
+// ================= PROMPT TEMPLATES =================
+let PROMPT_TEMPLATES = {};
+try {
+    PROMPT_TEMPLATES = JSON.parse(
+        fs.readFileSync(path.join(__dirname, '08_prompt_templates.json'), 'utf-8')
+    );
+} catch (e) {
+    console.warn('Could not load 08_prompt_templates.json, using fallback prompts.');
+    PROMPT_TEMPLATES = {
+        question: "You are an expert programmer.\n\nLanguage: {language}\nQuestion: {user_input}\n\nRespond ONLY in this exact format:\n[CODE]\n<code here>\n\n[OUTPUT]\n<output here>",
+        code: "You are a code cleaner. Fix and clean this code.\n\nLanguage: {language}\nCode:\n{user_input}\n\nRespond ONLY in this exact format:\n[CODE]\n<clean code>\n\n[OUTPUT]\n<expected output>",
+        file: "You are a code extraction assistant. Extract and fix the code from this file.\n\nLanguage: {language}\nFile Content:\n{user_input}\n\nRespond ONLY in this exact format:\n[CODE]\n<extracted code>\n\n[OUTPUT]\n<expected output>"
+    };
+}
+
+function buildPrompt(userInput, inputType = 'question', language = 'Auto') {
+    const template = PROMPT_TEMPLATES[inputType] || PROMPT_TEMPLATES['question'];
+    return template
+        .replace('{user_input}', userInput)
+        .replace('{language}', language);
+}
+
+// ================= API: GENERATE =================
+app.post('/api/generate', async (req, res) => {
+    const startTime = Date.now();
+
+    try {
+        const { userInput, language = 'Auto', mode = 'standard' } = req.body;
+
+        if (!userInput || !userInput.trim()) {
+            return res.status(400).json({ error: "Input required" });
+        }
+
+        const inputType = classifyInput(userInput);
+        const model = mode === 'fast' ? MODELS.fast : MODELS.standard;
+        const prompt = buildPrompt(userInput, inputType, language);
+
+        const completion = await openai.chat.completions.create({
+            model,
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.2
+        });
+
+        const latencyMs = Date.now() - startTime;
+        const text = completion.choices[0].message.content;
+        const { code, output } = parseAIResponse(text);
+        const slug = generateSlug();
+        const detectedLanguage = language === 'Auto' ? detectLanguageFromCode(code) : language;
+        const modelUsed = completion.model || model;
+
+        if (pool) {
+            try {
+                await pool.query(
+                    `INSERT INTO snippets (slug, input_type, language, user_input, generated_code, generated_output, model_used)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                    [slug, inputType, detectedLanguage, userInput, code, output || '', modelUsed]
+                );
+
+                await pool.query(
+                    `INSERT INTO api_logs (request_type, prompt_tokens, completion_tokens, total_tokens, latency_ms)
+                     VALUES ($1, $2, $3, $4, $5)`,
+                    [
+                        'generate',
+                        completion.usage?.prompt_tokens || 0,
+                        completion.usage?.completion_tokens || 0,
+                        completion.usage?.total_tokens || 0,
+                        latencyMs
+                    ]
+                );
+            } catch (dbErr) {
+                console.error('DB insert error:', dbErr.message);
+                // Don't fail the request over a DB error
+            }
+        }
+
+        res.json({
+            success: true,
+            slug,
+            shareUrl: `${process.env.FRONTEND_URL || "http://localhost:5173"}/s/${slug}`,
+            code,
+            output,
+            language: detectedLanguage,
+            meta: {
+                model: modelUsed,
+                tokens: completion.usage?.total_tokens || 0,
+                latencyMs,
+                inputType
+            }
+        });
+
+    } catch (err) {
+        console.error('Generate error:', err.message);
+        res.status(500).json({ error: "AI generation failed", details: err.message });
+    }
+});
+
+// ================= API: FILE UPLOAD =================
+app.post('/api/upload', upload.single('file'), async (req, res) => {
+    const startTime = Date.now();
+
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: "No file uploaded or file type not allowed" });
+        }
+
+        const fileText = fs.readFileSync(req.file.path, 'utf-8');
+        const language = req.body.language || 'Auto';
+        const model = MODELS.standard;
+        const prompt = buildPrompt(fileText, 'file', language);
+
+        const completion = await openai.chat.completions.create({
+            model,
+            messages: [{ role: "user", content: prompt }]
+        });
+
+        const latencyMs = Date.now() - startTime;
+        const text = completion.choices[0].message.content;
+        const { code, output } = parseAIResponse(text);
+        const slug = generateSlug();
+        const detectedLanguage = language === 'Auto' ? detectLanguageFromCode(code) : language;
+        const modelUsed = completion.model || model;
+
+        if (pool) {
+            try {
+                const snippetResult = await pool.query(
+                    `INSERT INTO snippets (slug, input_type, language, user_input, generated_code, generated_output, model_used)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+                    [slug, 'file', detectedLanguage, fileText, code, output || '', modelUsed]
+                );
+
+                const snippetId = snippetResult.rows[0].id;
+
+                await pool.query(
+                    `INSERT INTO file_uploads (snippet_id, original_filename, stored_filename, file_size_bytes, mime_type)
+                     VALUES ($1, $2, $3, $4, $5)`,
+                    [snippetId, req.file.originalname, req.file.filename, req.file.size, req.file.mimetype]
+                );
+
+                await pool.query(
+                    `INSERT INTO api_logs (request_type, prompt_tokens, completion_tokens, total_tokens, latency_ms)
+                     VALUES ($1, $2, $3, $4, $5)`,
+                    ['upload', completion.usage?.prompt_tokens || 0, completion.usage?.completion_tokens || 0, completion.usage?.total_tokens || 0, latencyMs]
+                );
+            } catch (dbErr) {
+                console.error('DB insert error:', dbErr.message);
+            }
+        }
+
+        // Clean up temp file
+        try { fs.unlinkSync(req.file.path); } catch (_) {}
+
+        res.json({
+            success: true,
+            slug,
+            shareUrl: `${process.env.FRONTEND_URL || "http://localhost:5173"}/s/${slug}`,
+            code,
+            output,
+            language: detectedLanguage,
+            meta: {
+                model: modelUsed,
+                tokens: completion.usage?.total_tokens || 0,
+                latencyMs,
+                inputType: 'file'
+            }
+        });
+
+    } catch (err) {
+        console.error('Upload error:', err.message);
+        res.status(500).json({ error: "Upload failed", details: err.message });
+    }
+});
+
+// ================= API: GET SNIPPET =================
+app.get('/api/s/:slug', async (req, res) => {
+    try {
+        const { slug } = req.params;
+
+        if (!pool) {
+            return res.status(503).json({ error: "Database not configured" });
+        }
+
+        const result = await pool.query(
+            `UPDATE snippets SET view_count = view_count + 1
+             WHERE slug = $1 AND is_public = TRUE
+             RETURNING *`,
+            [slug]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: "Snippet not found" });
+        }
+
+        res.json({ success: true, snippet: result.rows[0] });
+
+    } catch (err) {
+        console.error('Fetch snippet error:', err.message);
+        res.status(500).json({ error: "Failed to fetch snippet" });
+    }
+});
+
+// ================= API: GET RAW CODE =================
+app.get('/api/s/:slug/raw', async (req, res) => {
+    try {
+        const { slug } = req.params;
+
+        if (!pool) {
+            return res.status(503).json({ error: "Database not configured" });
+        }
+
+        const result = await pool.query(
+            `SELECT generated_code, language FROM snippets WHERE slug = $1 AND is_public = TRUE`,
+            [slug]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: "Snippet not found" });
+        }
+
+        res.type('text/plain').send(result.rows[0].generated_code);
+
+    } catch (err) {
+        console.error('Fetch raw error:', err.message);
+        res.status(500).json({ error: "Failed to fetch raw snippet" });
+    }
+});
+
+// ================= API: STATS =================
+app.get('/api/stats', async (req, res) => {
+    try {
+        if (!pool) {
+            return res.status(503).json({ error: "Database not configured" });
+        }
+
+        const [snippets, logs] = await Promise.all([
+            pool.query(`SELECT COUNT(*) AS total, COALESCE(SUM(view_count), 0) AS total_views FROM snippets`),
+            pool.query(`SELECT COALESCE(SUM(total_tokens), 0) AS total_tokens, COALESCE(AVG(latency_ms), 0) AS avg_latency_ms FROM api_logs`)
+        ]);
+
+        res.json({
+            success: true,
+            stats: {
+                totalSnippets: parseInt(snippets.rows[0].total),
+                totalViews: parseInt(snippets.rows[0].total_views),
+                totalTokensUsed: parseInt(logs.rows[0].total_tokens),
+                avgLatencyMs: Math.round(parseFloat(logs.rows[0].avg_latency_ms))
+            }
+        });
+
+    } catch (err) {
+        console.error('Stats error:', err.message);
+        res.status(500).json({ error: "Failed to fetch stats" });
+    }
+});
+
+// ================= HEALTH =================
+app.get('/health', async (req, res) => {
+    let dbStatus = 'not configured';
+    if (pool) {
+        try {
+            await pool.query('SELECT 1');
+            dbStatus = 'connected';
+        } catch {
+            dbStatus = 'error';
+        }
+    }
+    res.json({ status: "ok", db: dbStatus, model: MODELS.standard });
+});
+
+// ================= START =================
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`DB: ${process.env.DATABASE_URL ? 'configured' : 'not configured'}`);
+    console.log(`Model: ${MODELS.standard}`);
 });

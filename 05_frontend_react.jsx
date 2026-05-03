@@ -25,7 +25,10 @@ export function useCodeGenerator() {
             });
 
             const data = await res.json();
-            if (!data.success) throw new Error(data.error);
+
+            if (!res.ok || !data.success) {
+                throw new Error(data.error || `Server error ${res.status}`);
+            }
 
             setResult(data);
             return data;
@@ -38,12 +41,13 @@ export function useCodeGenerator() {
     };
 
     // Upload file
-    const uploadFile = async (file) => {
+    const uploadFile = async (file, language = 'Auto') => {
         setLoading(true);
         setError(null);
 
         const formData = new FormData();
         formData.append('file', file);
+        formData.append('language', language);
 
         try {
             const res = await fetch(`${API_URL}/api/upload`, {
@@ -52,7 +56,10 @@ export function useCodeGenerator() {
             });
 
             const data = await res.json();
-            if (!data.success) throw new Error(data.error);
+
+            if (!res.ok || !data.success) {
+                throw new Error(data.error || `Server error ${res.status}`);
+            }
 
             setResult(data);
             return data;
@@ -64,19 +71,32 @@ export function useCodeGenerator() {
         }
     };
 
-    // FIX: fetchSnippet called /api/s/:slug which didn't exist on the server — now it does
+    // Fetch shared snippet by slug
     const fetchSnippet = async (slug) => {
-        const res = await fetch(`${API_URL}/api/s/${slug}`);
-        const data = await res.json();
-        if (!data.success) throw new Error(data.error);
-        return data.snippet;
+        try {
+            const res = await fetch(`${API_URL}/api/s/${slug}`);
+            const data = await res.json();
+            if (!res.ok || !data.success) throw new Error(data.error || 'Not found');
+            return data.snippet;
+        } catch (err) {
+            setError(err.message);
+            throw err;
+        }
     };
 
-    return { generate, uploadFile, fetchSnippet, loading, result, error };
+    // Fetch platform stats
+    const fetchStats = async () => {
+        const res = await fetch(`${API_URL}/api/stats`);
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error);
+        return data.stats;
+    };
+
+    return { generate, uploadFile, fetchSnippet, fetchStats, loading, result, error };
 }
 
 // ============================================
-// COMPONENT USAGE
+// COMPONENT USAGE EXAMPLE
 // ============================================
 
 function CodeGenerator() {
@@ -84,21 +104,30 @@ function CodeGenerator() {
     const [input, setInput] = useState('');
     const [language, setLanguage] = useState('Auto');
     const [mode, setMode] = useState('standard'); // 'standard' | 'fast'
+    const [copied, setCopied] = useState(false);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
+        if (!input.trim()) return;
         await generate(input, language, mode);
     };
 
     const handleFileUpload = async (e) => {
         const file = e.target.files[0];
-        if (file) await uploadFile(file);
+        if (file) await uploadFile(file, language);
     };
 
     const copyShareLink = () => {
         if (result?.shareUrl) {
             navigator.clipboard.writeText(result.shareUrl);
-            // Show toast...
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        }
+    };
+
+    const copyCode = () => {
+        if (result?.code) {
+            navigator.clipboard.writeText(result.code);
         }
     };
 
@@ -106,10 +135,16 @@ function CodeGenerator() {
         <div className="code-generator">
             {/* Mode Toggle */}
             <div className="mode-toggle">
-                <button onClick={() => setMode('standard')} className={mode === 'standard' ? 'active' : ''}>
+                <button
+                    onClick={() => setMode('standard')}
+                    className={mode === 'standard' ? 'active' : ''}
+                >
                     ⚡ Standard
                 </button>
-                <button onClick={() => setMode('fast')} className={mode === 'fast' ? 'active' : ''}>
+                <button
+                    onClick={() => setMode('fast')}
+                    className={mode === 'fast' ? 'active' : ''}
+                >
                     🚀 Fast
                 </button>
             </div>
@@ -135,7 +170,7 @@ function CodeGenerator() {
                     placeholder="Ask a question or paste code..."
                     rows={6}
                 />
-                <button type="submit" disabled={loading}>
+                <button type="submit" disabled={loading || !input.trim()}>
                     {loading ? 'Generating...' : 'Generate'}
                 </button>
             </form>
@@ -144,18 +179,30 @@ function CodeGenerator() {
             <div className="file-upload">
                 <label>
                     📎 Upload File
-                    <input type="file" onChange={handleFileUpload} accept=".py,.js,.ts,.java,.cpp,.c,.go,.rs,.sql,.txt" hidden />
+                    <input
+                        type="file"
+                        onChange={handleFileUpload}
+                        accept=".py,.js,.ts,.java,.cpp,.c,.go,.rs,.sql,.txt,.jsx,.tsx"
+                        hidden
+                    />
                 </label>
             </div>
+
+            {/* Error */}
+            {error && <div className="error">❌ {error}</div>}
 
             {/* Results */}
             {result && (
                 <div className="results">
                     <div className="code-block">
                         <div className="header">
-                            {/* FIX: result.language was used but server never returned it */}
-                            <span>{result.language || 'Unknown'}</span>
-                            <button onClick={copyShareLink}>🔗 Copy Share Link</button>
+                            <span>{result.language || 'Code'}</span>
+                            <div className="actions">
+                                <button onClick={copyCode}>📋 Copy Code</button>
+                                <button onClick={copyShareLink}>
+                                    🔗 {copied ? 'Copied!' : 'Share Link'}
+                                </button>
+                            </div>
                         </div>
                         <pre><code>{result.code}</code></pre>
                     </div>
@@ -167,18 +214,19 @@ function CodeGenerator() {
                         </div>
                     )}
 
-                    {/* FIX: result.meta was used but server never returned the meta object */}
+                    {/* Meta info — safely accessed with optional chaining */}
                     {result.meta && (
                         <div className="meta">
                             <span>Model: {result.meta.model}</span>
                             <span>Tokens: {result.meta.tokens}</span>
                             <span>Latency: {result.meta.latencyMs}ms</span>
+                            <span>Type: {result.meta.inputType}</span>
                         </div>
                     )}
                 </div>
             )}
-
-            {error && <div className="error">{error}</div>}
         </div>
     );
 }
+
+export default CodeGenerator;

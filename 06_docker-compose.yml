@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   api:
@@ -10,12 +10,13 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - NODE_ENV=development
       - FRONTEND_URL=http://localhost:5173
+      - PORT=3000
     volumes:
       - ./uploads:/app/uploads
-    # FIX: depends_on with no condition meant api could start before postgres was ready
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
 
   db:
     image: postgres:16-alpine
@@ -27,21 +28,12 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      # FIX: Auto-run schema on first start
-      - ./01_database_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
-    # FIX: Added healthcheck so api service waits for DB to actually be ready
+      - ./01_database_schema.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d codeshare"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
-      retries: 10
-
-  # NOTE: Redis is defined but not yet used in server.js
-  # Uncomment when you add caching/rate-limiting
-  # redis:
-  #   image: redis:7-alpine
-  #   ports:
-  #     - "6379:6379"
+      retries: 5
 
 volumes:
   postgres_data:
