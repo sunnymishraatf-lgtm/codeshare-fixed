@@ -71,10 +71,26 @@ function generateSlug() {
     return crypto.randomBytes(8).toString('base64url').slice(0, 12);
 }
 
+// REPLACE your current parseAIResponse with this:
 function parseAIResponse(text) {
-    const code = text.split("[CODE]")[1]?.split("[OUTPUT]")[0]?.trim() || "";
-    const output = text.split("[OUTPUT]")[1]?.trim() || "";
-    return { code, output };
+    // Try strict [CODE]...[OUTPUT] format first
+    if (text.includes("[CODE]")) {
+        const code = text.split("[CODE]")[1]?.split("[OUTPUT]")[0]?.trim() || "";
+        const output = text.split("[OUTPUT]")[1]?.trim() || "";
+        return { code, output };
+    }
+
+    // Fallback: extract markdown code blocks ```lang ... ```
+    const codeBlockMatch = text.match(/```(?:\w+)?\n([\s\S]*?)```/);
+    if (codeBlockMatch) {
+        const code = codeBlockMatch[1].trim();
+        // Everything after the code block is the output
+        const afterBlock = text.split(/```[\s\S]*?```/).pop()?.trim() || "";
+        return { code, output: afterBlock };
+    }
+
+    // Last resort: treat entire response as code
+    return { code: text.trim(), output: "" };
 }
 
 function classifyInput(userInput) {
