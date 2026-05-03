@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/codeshare
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - NODE_ENV=development
+      - FRONTEND_URL=http://localhost:5173
+    volumes:
+      - ./uploads:/app/uploads
+    # FIX: depends_on with no condition meant api could start before postgres was ready
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=codeshare
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # FIX: Auto-run schema on first start
+      - ./01_database_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    # FIX: Added healthcheck so api service waits for DB to actually be ready
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d codeshare"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # NOTE: Redis is defined but not yet used in server.js
+  # Uncomment when you add caching/rate-limiting
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+
+volumes:
+  postgres_data:
