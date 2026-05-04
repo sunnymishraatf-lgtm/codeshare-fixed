@@ -374,7 +374,7 @@ app.get('/api/stats', async (req, res) => {
 });
 
 // ================= HEALTH =================
-app.get('/health', async (req, res) => {
+async function healthHandler(req, res) {
     let dbStatus = 'not configured';
     if (pool) {
         try {
@@ -385,7 +385,12 @@ app.get('/health', async (req, res) => {
         }
     }
     res.json({ status: "ok", db: dbStatus, model: MODELS.standard });
-});
+}
+
+// Both paths so the frontend's testConnection() (/api/health) and
+// direct curl checks (/health) both work.
+app.get('/health', healthHandler);
+app.get('/api/health', healthHandler);
 
 // ================= START =================
 const PORT = process.env.PORT || 3000;

@@ -24,9 +24,23 @@ const openai = new OpenAI({
 
 // ================= HELPER =================
 function parseAIResponse(text) {
-    const code = text.split("[CODE]")[1]?.split("[OUTPUT]")[0]?.trim() || "";
-    const output = text.split("[OUTPUT]")[1]?.trim() || "";
-    return { code, output };
+    // Try strict [CODE]...[OUTPUT] format first
+    if (text.includes("[CODE]")) {
+        const code = text.split("[CODE]")[1]?.split("[OUTPUT]")[0]?.trim() || "";
+        const output = text.split("[OUTPUT]")[1]?.trim() || "";
+        return { code, output };
+    }
+
+    // Fallback: extract markdown code blocks ```lang ... ```
+    const codeBlockMatch = text.match(/```(?:\w+)?\n([\s\S]*?)```/);
+    if (codeBlockMatch) {
+        const code = codeBlockMatch[1].trim();
+        const afterBlock = text.split(/```[\s\S]*?```/).pop()?.trim() || "";
+        return { code, output: afterBlock };
+    }
+
+    // Last resort: treat entire response as code
+    return { code: text.trim(), output: "" };
 }
 
 function buildPrompt(input) {
@@ -58,7 +72,7 @@ app.post('/api/generate', async (req, res) => {
         const prompt = buildPrompt(userInput);
 
         const completion = await openai.chat.completions.create({
-            model: "mistralai/mistral-7b-instruct",
+            model: "openrouter/free",
             messages: [
                 { role: "user", content: prompt }
             ],
